@@ -127,8 +127,8 @@ class MultiStationCore:
         self,
         num_links_total=9,
         pkt_bits=30_000_000, # 8Mb
-        low_rate=40,
-        high_rate=150,
+        low_rate=10,
+        high_rate=50,
         mode="high",
         seed=0,
         rf_freq_ghz=19.0,
@@ -211,6 +211,43 @@ class MultiStationCore:
         
         self.weather = SimpleWeatherModel(seed)
 
+        self.log_file = "simulation_debug_log.csv" # デバッグ用
+        self.log_header = [
+            "TIME_SEC", 
+            "STEP", 
+            "GS_ID", 
+            "HO_EVENT", 
+            "ORBIT_HO",
+            "OLD_SAT", 
+            "NEW_SAT",
+            "LINKS_A_BEFORE", 
+            "LINKS_B_BEFORE",
+            "ACTION",
+            "LINKS_A_AFTER",
+            "LINKS_B_AFTER",
+            "CAPACITY_A_BPS", 
+            "CAPACITY_B_BPS",
+            "PACKETS_GENERATED", 
+            "PACKETS_SERVED",
+            "QUEUE_A_COUNT", 
+            "QUEUE_B_COUNT", 
+            "DELAY_MEAN_SEC",
+            "ISL_DELAY_SEC" 
+        ]
+        
+        # ログファイルの初期化
+        with open(self.log_file, "w", newline="") as f:
+            import csv
+            writer = csv.writer(f)
+            writer.writerow(self.log_header)
+            
+        # パケット到着ログ用のバッファ
+        self.packet_arrival_log = [] 
+        
+        # ... (既存の _init_allocation() などの呼び出し)
+        self._init_allocation()
+        self._init_link_capacities()
+
         self._init_allocation()
         self._init_link_capacities()
 
@@ -233,6 +270,33 @@ class MultiStationCore:
     # ==========================================================
     # Packet Generation
     # ==========================================================
+    """
+    def _generate_packets(self, lam, dt):
+       
+        #到着率 lam [pkt/s] で dt 秒間に発生するパケットリストを生成
+        #到着間隔は指数分布に従う (Poisson Process)
+        
+        packets = []
+        if lam <= 0:
+            return packets
+
+        t_cursor = self.current_time
+        end_time = self.current_time + dt
+        
+        while True:
+            # 次のパケットまでの間隔
+            interval = self.rng.exponential(1.0 / lam)
+            t_cursor += interval
+            
+            if t_cursor >= end_time:
+                break
+                
+            self.global_pkt_id += 1
+            # パケット生成 (ID, 絶対時刻, サイズ)
+            pkt = Packet(self.global_pkt_id, t_cursor, self.pkt_bits)
+            packets.append(pkt)
+            
+        return packets"""
     def _generate_packets(self, lam, dt):
         """
         到着率 lam [pkt/s] で dt 秒間に発生するパケットリストを生成
@@ -403,7 +467,7 @@ class MultiStationCore:
         snap = self.snapshots[0]
         return self._build_obs(snap)
 
-    # ==========================================================
+# ==========================================================
     # Step (Packet-Level Event Driven)
     # ==========================================================
     def step(self, actions):
@@ -495,18 +559,7 @@ class MultiStationCore:
             
             # パケット移動 (Buffer Transfer)
             # srcにある全パケットを取り出し、destの末尾に追加
-            # 各パケットの creation_time はいじらない（累積遅延に自然に加算されるため）
-            # ただし、ISL転送にかかる物理時間分だけ creation_time をマイナスするか、
-            # あるいは busy_until を後ろ倒しにするかだが、
-            # ここでは「パケットが瞬時に移動するが、ISL遅延分だけ余計に時間がかかった」とみなすため、
-            # 追加的な処理はせず、パケットが宛先キューで処理されるのを待つ。
-            # ISL遅延を明示的にRewardに反映させたい場合、パケットの送信完了時刻にゲタを履かせる等の処理が必要。
-            # 今回はシンプルに、「バッファが移動して、そこで処理待ちになる」ことで遅延が増えるモデルとする。
-            
-            # ※ ISL遅延を明示的に加算する場合、Packetに 'extra_delay' 属性を持たせる手もあるが、
-            # ここではHOペナルティとして固定値をReward計算時に考慮する方式をとるか、
-            # あるいは単純にキューが混むことによる遅延増加に任せる。
-            # ユーザ要望の「累積遅延」観点では、転送自体に時間がかかるはず。
+            # ... (中略)
             # 簡易実装: 移動するパケット全ての creation_time を total_isl_delay 分だけ過去にずらす(=遅延が増える)
             # これにより、送信完了時の (finish - creation) が増大する。
             

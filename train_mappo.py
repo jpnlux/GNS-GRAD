@@ -208,7 +208,7 @@ if __name__ == "__main__":
 
     # 1) 学習
     agent, env, max_steps = train_mappo(
-        total_episodes=10,
+        total_episodes=200,
         max_steps_per_episode=None,
         device=device,
     )
@@ -218,7 +218,7 @@ if __name__ == "__main__":
         env=env,
         agent=agent,
         max_steps_per_episode=max_steps,
-        n_eval_episodes=20,
+        n_eval_episodes=50,
         mode="random",
         log_csv="action_delay_random.csv",
     )
@@ -228,7 +228,7 @@ if __name__ == "__main__":
         env=env,
         agent=agent,
         max_steps_per_episode=max_steps,
-        n_eval_episodes=20,
+        n_eval_episodes=50,
         mode="trained",
         log_csv="action_delay_trained.csv",
     )
