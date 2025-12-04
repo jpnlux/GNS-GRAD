@@ -89,3 +89,10 @@ class TrafficPattern:
             return self.high
         else:
             raise ValueError("mode は 'low' または 'high'")
+
+#---------
+class Packet:
+    def __init__(self, pkt_id, creation_time, size_bits):
+        self.id = pkt_id
+        self.creation_time = creation_time  # 生成時刻 (絶対時刻)
+        self.size_bits = size_bits          # サイズ (bit)
