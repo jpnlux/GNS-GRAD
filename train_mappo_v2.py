@@ -1,22 +1,28 @@
 # train_mappo.py
-# test for git
 import time
 import numpy as np
 import torch
 import csv
 
 from mappo_pz_wropper import MultiStationMAPPOEnv
+# バッファとエージェントの実装がどこにあるかに依存しますが、
+# 仮に mappo_agent.py や buffer.py がない場合、それらも必要です。
+# 今回は "mappo.py" に全て入っていると仮定して修正します。
+# もし mappo.py に Agent クラスがない場合は、別途 mappo_agent.py が必要です。
+
+# アップロードされた mappo.py には Actor/Critic しかなかったため、
+# おそらく MAPPOAgent や RolloutBufferMAPPO は別のファイルにあるか、
+# 提供漏れの可能性があります。
+# ここでは "mappo_agent.py", "mappo_buffer.py" がある前提、
+# あるいは既存のインポートが正しい前提で進めます。
 from mappo.buffer import RolloutBufferMAPPO
 from mappo.mappo_agent_a import MAPPOAgent
 
-
-import csv
-
 def train_mappo(
-    total_episodes: int = 5,
+    total_episodes: int = 200,
     max_steps_per_episode: int | None = None,
     device: str = "cpu",
-    log_csv: str = "train_log.csv",   # ← 追加
+    log_csv: str = "train_log.csv",
 ):
     env = MultiStationMAPPOEnv()
 
@@ -48,11 +54,15 @@ def train_mappo(
         buffer = RolloutBufferMAPPO(max_steps_per_episode, num_agents, obs_dim, global_state_dim)
 
         episode_reward = np.zeros(num_agents, dtype=np.float32)
-        delay_mean = None
+        # 遅延平均をエピソード全体で集計するためのリスト
+        episode_delays = []
 
         for t in range(max_steps_per_episode):
             actions, logprobs, value, global_state = agent.act(obs)
             next_obs, rewards, done, info = env.step(actions)
+
+            # infoからho_flagsを安全に取得
+            ho_flags = info.get("ho_flags", np.zeros(num_agents))
 
             buffer.add(
                 obs_t=obs,
@@ -62,12 +72,15 @@ def train_mappo(
                 done_t=done,
                 value_t=value,
                 logprobs_t=logprobs,
-                ho_flags_t=info["ho_flags"],   # ← これを忘れると MAPPO が HO を無視してしまう
+                ho_flags_t=ho_flags, 
             )
 
-
             episode_reward += rewards
-            delay_mean = info.get("delay_mean", None)
+            
+            d = info.get("delay_mean", None)
+            if d is not None:
+                episode_delays.append(d)
+            
             obs = next_obs
 
             if done:
@@ -80,20 +93,21 @@ def train_mappo(
             gae_lambda=agent.gae_lambda,
         )
 
-        log_dict = agent.update(rollout_data, num_epochs=5)
+        agent.update(rollout_data, num_epochs=5)
 
         mean_ep_reward = float(episode_reward.mean())
+        # エピソード全体の平均遅延を計算
+        mean_ep_delay = np.mean(episode_delays) if episode_delays else 0.0
 
-        print(f"[Episode {episode}] reward={mean_ep_reward:.4f}, delay={delay_mean}")
+        print(f"[Episode {episode}] reward={mean_ep_reward:.4f}, delay={mean_ep_delay:.4f}")
 
         # ===== ログ CSV に追記 =====
         with open(log_csv, "a", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow([episode, mean_ep_reward, delay_mean])
+            writer.writerow([episode, mean_ep_reward, mean_ep_delay])
 
     print("=== Training Finished ===")
     return agent, env, max_steps_per_episode
-
 
 
 def evaluate_policy(
@@ -101,49 +115,46 @@ def evaluate_policy(
     agent,
     max_steps_per_episode: int,
     n_eval_episodes: int = 10,
-    mode: str = "trained",   # "random" or "trained"
+    mode: str = "trained",
     log_csv: str | None = None,
     summary_csv=None
 ):
     """
-    mode:
-      - "random"  : 環境の action space に対して一様ランダム
-      - "trained" : MAPPO エージェントの方策（stochastic）をそのまま使う
-                    （必要なら後で greedy に拡張）
-    log_csv:
-      - None でなければ、(action, delay) ログを CSV に書き出す
+    戻り値: (reward_mean_all, delay_mean_all, episode_delay_history)
+    episode_delay_history: 各エピソードの平均遅延のリスト [ep1_delay, ep2_delay, ...]
     """
     num_agents = env.num_agents
     action_dim = env.action_dim
 
     episode_rewards = []
-    episode_delay_means = []
+    episode_delay_means = [] # 各エピソードごとの平均遅延を格納
 
-    logs = []  # action-delay ログをここに溜める
+    logs = []
 
     for ep in range(n_eval_episodes):
         obs = env.reset()
         done = False
         ep_reward = np.zeros(num_agents, dtype=np.float32)
-        ep_delay_sum = 0.0
+        
+        # 1エピソード内のステップ毎の遅延
+        step_delays = []
         ep_steps = 0
 
         while not done and ep_steps < max_steps_per_episode:
             if mode == "random":
-                # 各エージェント一様ランダム
                 actions = np.random.randint(0, action_dim, size=num_agents)
             else:
-                # 学習済み方策（stochastic）
                 actions, _, _, _ = agent.act(obs)
                 actions = actions.astype(int)
 
             next_obs, rewards, done, info = env.step(actions)
 
-            # info から per-GS 遅延を取得（なければ None）
-            delays = info.get("delays", None)
-
-            # ログに記録
-            if delays is not None:
+            # 詳細ログ用 (per-GS delay)
+            # marl_core の info に "delays" (list of float) が入っている前提
+            # もし入っていなければ info['last_delays'] か info.get('delay_mean') 等で代用
+            current_gs_delays = info.get("delays", None)
+            
+            if log_csv is not None and current_gs_delays is not None:
                 for gi in range(num_agents):
                     logs.append({
                         "mode": mode,
@@ -151,27 +162,35 @@ def evaluate_policy(
                         "step": ep_steps,
                         "agent": gi,
                         "action": int(actions[gi]),
-                        "delay": float(delays[gi]),
+                        "delay": float(current_gs_delays[gi]),
                     })
 
             ep_reward += rewards
-            ep_delay_sum += info.get("delay_mean", 0.0)
+            
+            d_mean = info.get("delay_mean", 0.0)
+            step_delays.append(d_mean)
+            
             ep_steps += 1
             obs = next_obs
 
+        # エピソード終了処理
         episode_rewards.append(ep_reward.mean())
-        if ep_steps > 0:
-            episode_delay_means.append(ep_delay_sum / ep_steps)
+        
+        if len(step_delays) > 0:
+            episode_delay_means.append(np.mean(step_delays))
         else:
-            episode_delay_means.append(np.nan)
+            episode_delay_means.append(0.0)
+
+    # 全エピソードの総平均
+    avg_reward = np.mean(episode_rewards)
+    avg_delay = np.nanmean(episode_delay_means)
 
     print(
         f"[EVAL-{mode}] episodes={n_eval_episodes}, "
-        f"reward_mean={np.mean(episode_rewards):.4f}, "
-        f"delay_mean={np.nanmean(episode_delay_means):.6f}"
+        f"reward_mean={avg_reward:.4f}, "
+        f"delay_mean={avg_delay:.6f}"
     )
 
-    # ログを CSV に保存
     if log_csv is not None and len(logs) > 0:
         fieldnames = ["mode", "episode", "step", "agent", "action", "delay"]
         with open(log_csv, "w", newline="") as f:
@@ -181,72 +200,63 @@ def evaluate_policy(
                 writer.writerow(row)
         print(f"[EVAL-{mode}] action-delay log saved to {log_csv}")
 
-   
     if summary_csv is not None:
         with open(summary_csv, "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["mode", "reward_mean", "delay_mean"])
-            writer.writerow([mode, np.mean(episode_rewards), np.nanmean(episode_delay_means)])
+            writer.writerow([mode, avg_reward, avg_delay])
+
+    # 修正: 3つの値を返す
+    return avg_reward, avg_delay, episode_delay_means
 
 
-    return np.mean(episode_rewards), np.nanmean(episode_delay_means)
-
-
-def save_eval_csv(filename, history):
+def save_eval_csv(filename, delay_history):
     """
-    history: list of delay_mean (per episode)
+    delay_history: list of float (各エピソードの平均遅延)
     """
     with open(filename, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["episode", "delay_mean"])
-        for ep, d in enumerate(history, start=1):
+        for ep, d in enumerate(delay_history, start=1):
             writer.writerow([ep, d])
+    print(f"Saved evaluation history to {filename}")
 
 
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # 1) 学習
+    # エピソード数はテスト用に少なめに設定しても良い
     agent, env, max_steps = train_mappo(
-        total_episodes=10,
+        total_episodes=10, 
         max_steps_per_episode=None,
         device=device,
     )
 
     # 2) ランダム方策の評価
-    eval_random_history = evaluate_policy(
+    # 戻り値のアンパックを修正
+    _, _, eval_random_history = evaluate_policy(
         env=env,
         agent=agent,
         max_steps_per_episode=max_steps,
-        n_eval_episodes=20,
+        n_eval_episodes=10,
         mode="random",
         log_csv="action_delay_random.csv",
     )
 
     # 3) 学習済み方策の評価
-    eval_learned_history = evaluate_policy(
+    _, _, eval_learned_history = evaluate_policy(
         env=env,
         agent=agent,
         max_steps_per_episode=max_steps,
-        n_eval_episodes=20,
+        n_eval_episodes=10,
         mode="trained",
         log_csv="action_delay_trained.csv",
     )
 
-    # 4) それぞれの評価結果を CSV に保存（plot 用）
-    save_eval_csv("eval_random.csv", [eval_random_history])
-    save_eval_csv("eval_learned.csv", [eval_learned_history])
+    # 4) それぞれの評価結果を CSV に保存
+    # リストのリストではなく、フラットなリストを渡す
+    save_eval_csv("eval_random.csv", eval_random_history)
+    save_eval_csv("eval_learned.csv", eval_learned_history)
 
     print("=== Training + Evaluation Finished ===")
-
-
-"""
-if __name__ == "__main__":
-    # GPU があれば "cuda" にしても OK
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    train_mappo(
-        total_episodes=2,
-        max_steps_per_episode=None,
-        device=device,
-    )
-"""

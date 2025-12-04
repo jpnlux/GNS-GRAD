@@ -126,7 +126,7 @@ class MultiStationCore:
     def __init__(
         self,
         num_links_total=9,
-        pkt_bits=8_000_000, # 8Mb
+        pkt_bits=30_000_000, # 8Mb
         low_rate=40,
         high_rate=150,
         mode="high",
